@@ -1,0 +1,34 @@
+#include <Wire.h>
+#include <DFRobot_MAX30102.h>
+
+DFRobot_MAX30102 particleSensor;
+
+void setup() {
+    Wire.begin(21, 22); // Initialize I2C communication with SDA and SCL pins
+    Serial.begin(115200);
+    while (!particleSensor.begin()) {
+        Serial.println("MAX30102 was not found");
+        delay(1000);
+    }
+    particleSensor.sensorConfiguration(/*ledBrightness=*/0x1F, /*sampleAverage=*/SAMPLEAVG_4, /*ledMode=*/MODE_MULTILED, /*sampleRate=*/SAMPLERATE_400, /*pulseWidth=*/PULSEWIDTH_411, /*adcRange=*/ADCRANGE_4096);
+}
+
+void loop() {
+    long irValue = particleSensor.getIR();
+    long redValue = particleSensor.getRed();
+    
+    if (irValue > 50000) { // If the IR value is valid
+        int heartRate = particleSensor.getHeartRate();
+        int oxygen = particleSensor.getOxygen();
+        
+        Serial.print("Heart Rate: ");
+        Serial.print(heartRate);
+        Serial.print(" bpm, SpO2: ");
+        Serial.print(oxygen);
+        Serial.println(" %");
+    } else {
+        Serial.println("No finger detected");
+    }
+    
+    delay(1000);
+}
