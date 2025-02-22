@@ -2,3 +2,5 @@
 .vscode
 .idea
 .env
+samples
+src/example.*

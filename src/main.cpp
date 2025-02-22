@@ -1,88 +1,134 @@
-#include <Wire.h>
-#include "MAX30105.h"
+#include <DFRobot_MAX30102.h>
+#include <ThingSpeak.h>
+#include <WiFi.h>
+#define WIFI_NETWORK "Shiro" 
+#define WIFI_PASSWORD "Shiro@500" 
+#define WIFI_TIMEOUT_MS 5000 
+#define CHANNEL_ID 2851576 
+#define CHANNEL_API "YJYX968AT0XUKIY2" 
 
-#include "heartRate.h"
 
-MAX30105 particleSensor;
+// Task declarations 
+void keepWiFiAlive(void * parameter); 
+void sensorTask(void * parameter); 
+void thigspeaktask(void * parameter); 
+ 
+WiFiClient client;
+DFRobot_MAX30102 particleSensor;
 
-const byte RATE_SIZE = 32; //Increase this for more averaging. 4 is good.
-byte rates[RATE_SIZE]; //Array of heart rates
-byte rateSpot = 0;
-long lastBeat = 0; //Time at which the last beat occurred
+TaskHandle_t SensorTaskHandle; 
 
-float beatsPerMinute;
-int beatAvg;
+int spo2Value = -1;
 
-void sensorTask(void * parameter);
 
 void setup()
 {
+  //Init serial
   Serial.begin(115200);
-  Serial.println("Initializing...");
-
-  // Initialize sensor
-  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) //Use default I2C port, 400kHz speed
-  {
-    Serial.println("MAX30105 was not found. Please check wiring/power. ");
-    while (1);
+  ThingSpeak.begin(client);
+  while (!particleSensor.begin()) {
+    Serial.println("MAX30102 was not found");
+    delay(1000);
   }
-  Serial.println("Place your index finger on the sensor with steady pressure.");
+  particleSensor.sensorConfiguration(/*ledBrightness=*/50, /*sampleAverage=*/SAMPLEAVG_4, \
+                        /*ledMode=*/MODE_MULTILED, /*sampleRate=*/SAMPLERATE_100, \
+                        /*pulseWidth=*/PULSEWIDTH_411, /*adcRange=*/ADCRANGE_16384);
 
-  particleSensor.setup(); //Configure sensor with default settings
-  particleSensor.setPulseAmplitudeRed(0x0A); //Turn Red LED to low to indicate sensor is running
-  particleSensor.setPulseAmplitudeGreen(0); //Turn off Green LED
+  // Create the sensor task
+  BaseType_t result = xTaskCreatePinnedToCore(
+    sensorTask,           // Task function
+    "Sensor Task",        // Name of the task
+    4096,                 // Stack size in words
+    NULL,                 // Parameter
+    1,                    // Priority
+    &SensorTaskHandle,     // Task handle
+    0
+  );
+ 
+  xTaskCreatePinnedToCore( 
+    keepWiFiAlive, 
+    "KeepWiFiAlive", 
+    10000, 
+    NULL, 
+    1, 
+    NULL,
+    CONFIG_ARDUINO_RUNNING_CORE
+  ); 
 
-  // Create the sensor task 
-  xTaskCreate( 
-    sensorTask,           // Task function 
-    "SensorTask",         // Name of the task 
-    2048,                // Stack size in bytes 
-    NULL,                 // Parameters passed to the task 
-    1,                    // Priority of the task 
-    NULL                 // Task handle 
+  xTaskCreatePinnedToCore( 
+    thigspeaktask, 
+    "thigspeaktask", 
+    10000, 
+    NULL, 
+    1, 
+    NULL,
+    CONFIG_ARDUINO_RUNNING_CORE
   ); 
 }
 
+int32_t SPO2; //SPO2
+int8_t SPO2Valid; //Flag to display if SPO2 calculation is valid
+int32_t heartRate; //Heart-rate
+int8_t heartRateValid; //Flag to display if heart-rate calculation is valid 
+
 void loop()
 {
-  
+   // The main loop can be used for other tasks or remain idle
+  vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay to prevent loop hogging the CPU
 }
 
-void sensorTask(void * parameter) {
-  for (;;)
-  {
-    long irValue = particleSensor.getIR();
+void sensorTask(void *) {
+  for (;;) {
+    Serial.println(F("Wait about four seconds"));
+    particleSensor.heartrateAndOxygenSaturation(/**SPO2=*/&SPO2, /**SPO2Valid=*/&SPO2Valid, /**heartRate=*/&heartRate, /**heartRateValid=*/&heartRateValid);
+    //Print result 
+    Serial.print(F("SPO2="));
+    Serial.print(SPO2, DEC);
+    Serial.print(F(", SPO2Valid="));
+    Serial.println(SPO2Valid, DEC);
 
-    if (checkForBeat(irValue) == true)
-    {
-      //We sensed a beat!
-      long delta = millis() - lastBeat;
-      lastBeat = millis();
-
-      beatsPerMinute = 60 / (delta / 1000.0);
-
-      if (beatsPerMinute < 255 && beatsPerMinute > 20)
-      {
-        rates[rateSpot++] = (byte)beatsPerMinute; //Store this reading in the array
-        rateSpot %= RATE_SIZE; //Wrap variable
-
-        //Take average of readings
-        beatAvg = 0;
-        for (byte x = 0 ; x < RATE_SIZE ; x++)
-          beatAvg += rates[x];
-        beatAvg /= RATE_SIZE;
-      }
+    if (SPO2Valid != 0) {
+      spo2Value = SPO2;
     }
-
-    Serial.print("Avg BPM = ");
-    Serial.print(beatAvg);
-
-    if (irValue < 50000)
-      Serial.print(" No finger?");
-
-    Serial.println();
+    // vTaskDelay(4000 / portTICK_PERIOD_MS);
   }
-  
 }
 
+void keepWiFiAlive(void * parameter) { 
+  for (;;) {  // Infinite loop to keep the task running 
+    if (WiFi.status() == WL_CONNECTED) { 
+      Serial.println("WiFi still connected."); 
+      vTaskDelay(10000 / portTICK_PERIOD_MS); 
+      continue; 
+    } 
+ 
+    Serial.println("WiFi Connecting..."); 
+    WiFi.mode(WIFI_STA); 
+    WiFi.begin(WIFI_NETWORK, WIFI_PASSWORD); 
+ 
+    unsigned long startAttemptTime = millis(); 
+ 
+    // Attempt to connect within the timeout 
+    while (WiFi.status() != WL_CONNECTED && 
+           millis() - startAttemptTime < WIFI_TIMEOUT_MS) {} 
+ 
+    if (WiFi.status() != WL_CONNECTED) { 
+      Serial.println("[WIFI] FAILED"); 
+      vTaskDelay(WIFI_TIMEOUT_MS / portTICK_PERIOD_MS); 
+    } else { 
+      Serial.println("[WIFI] Connected: " + WiFi.localIP().toString()); 
+    } 
+  } 
+}
 
+void thigspeaktask(void * parameter) { 
+  for (;;) {  
+ 
+    // Delay before reading (2 seconds) 
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    if (spo2Value != -1)
+      ThingSpeak.writeField(CHANNEL_ID,1,spo2Value,CHANNEL_API);
+      Serial.println("Message sent.");
+    vTaskDelay(13000 / portTICK_PERIOD_MS);
+  }
+}
